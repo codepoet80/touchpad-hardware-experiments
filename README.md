@@ -1,6 +1,8 @@
 # webOS hardware tests — USB and Bluetooth accessories on the HP TouchPad
 
-Findings and tools from making modern accessories work on a stock webOS 3.0.5
+![Bluetooth Gamepad Icon](bluetooth-shim/bt-gamepad.png)
+
+Findings and tools for making modern accessories work on a stock webOS 3.0.5
 TouchPad. See `DEVICE-STATE.md` for the exact state of the dev unit and how to
 revert each change.
 
@@ -76,7 +78,7 @@ The Settings app's `Bluetooth.js` is the API rosetta stone.
 
 The real fix is **[`bluetooth-shim/`](bluetooth-shim/)**, an LD_PRELOAD
 interposer on `libPmBtBsaif.so`'s HID→uinput bridge. It began from the original
-interposer concept by **Herrie** (webOS community), which we carried the rest of
+interposer concept by **Herrie82** (webOS community), which we carried the rest of
 the way: report-framing fix, descriptor-cache recovery, the PDK-jail and udev
 work, the Bluetooth settings-app connect edits, and a deployable Preware package.
 A DualShock 4 now appears as a true gamepad evdev node — **14/14 buttons, both

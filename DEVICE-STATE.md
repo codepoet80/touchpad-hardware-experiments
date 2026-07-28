@@ -23,6 +23,7 @@ Last updated: 2026-07-27.
 | 13 | `/var/log/btshim.log` — shim log, dump mode ON (per-report hexdumps). Disable dump: `touch /var/btshim-nodump; killall PmBtEngine` | Yes | `rm /var/log/btshim.log` |
 | 14 | `/etc/udev/rules.d/99-bt-gamepad.rules` — makes the "Wireless Controller" evdev node 0666 so launcher-jailed (uid 5003) apps can read it | Yes | `webos-bt-shim/scripts/undeploy.sh` or `rm` it + `udevcontrol reload_rules` |
 | 15 | Clone Keen installed with Bluetooth gamepad support: app `com.cmdrkeen.game` v1.3.0 at `/media/cryptofs/apps/usr/palm/applications/com.cmdrkeen.game` | Yes | `palm-install -r com.cmdrkeen.game` |
+| 16 | `/etc/jail_pdk.conf` patched to bind-mount `/dev/input` into the PDK app jail (adds `mkdir /dev/input` + `mount ro /dev/input` after `mkdir /dev`) so jailed apps can read the gamepad node; backup at `/etc/jail_pdk.conf.btshim-orig` | Yes | `webos-bt-shim/scripts/undeploy.sh`, or restore the backup |
 
 Note: #7 is superseded — radio is ON, DS4 re-paired (2026-07-27) and **fully working
 as a gamepad through the shim** (14 buttons, 2 sticks, analog triggers, hat verified).

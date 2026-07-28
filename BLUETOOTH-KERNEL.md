@@ -120,9 +120,9 @@ pin.
 
 | File | Purpose |
 |---|---|
-| `btbridge/btbridge.c` | pty↔`/dev/bt_uart` bridge; BCSP link establishment; `--loopback`, `--flow hw\|sw\|none`, `--speed`, `--nocrc`, `--letimeout` |
-| `btbridge/btctl.c` | minimal HCI control (`up`/`down`/`info`) — no BlueZ userspace on device |
-| `btbridge/sniffdec.py` | decoder for Palm's own HCI sniffer capture |
+| `bt-bridge/btbridge.c` | pty↔`/dev/bt_uart` bridge; BCSP link establishment; `--loopback`, `--flow hw\|sw\|none`, `--speed`, `--nocrc`, `--letimeout` |
+| `bt-bridge/btctl.c` | minimal HCI control (`up`/`down`/`info`) — no BlueZ userspace on device |
+| `bt-bridge/sniffdec.py` | decoder for Palm's own HCI sniffer capture |
 
 Palm's built-in HCI sniffer is genuinely useful and needs no extra software:
 

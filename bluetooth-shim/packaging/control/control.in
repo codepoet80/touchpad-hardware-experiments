@@ -1,0 +1,8 @@
+Package: org.webosarchive.btgamepad
+Version: @VERSION@
+Architecture: armv7
+Maintainer: webOS Archive
+Description: Bluetooth game controller support for the HP TouchPad
+Section: System
+Priority: optional
+Source: { "Type":"Application", "Feed":"WOSA Modernize", "Category":"Modernize", "LastUpdated":"@LASTUPDATED@", "Title":"Bluetooth Gamepad Support", "FullDescription":"Adds Bluetooth game-controller support to the HP TouchPad by interposing the stock (unfinished) Bluetooth HID path -- no binary patching. A DualShock 4 (and other classic BR/EDR HID pads) pairs and appears to apps as a real gamepad: both sticks, analog triggers, d-pad and all buttons. Games read it as a standard Linux input device.<br><br>Pairing: open Bluetooth settings, tap Add device, and put the pad in pairing mode -- it appears under the <b>Other</b> category. Pair it and it connects automatically. Later, press the pad's connect button (PS on a DS4), or tap it in the device list, to reconnect.<br><br><b>No Bluetooth LE.</b> The TouchPad radio is Bluetooth 2.1+EDR, so BLE-only controllers (Xbox One/Series and similar) cannot work -- this is a hardware limit.<br><br>Fully reversible; uninstall restores stock Bluetooth. Based on Herrie82's webos-bt-shim.", "MinWebOSVersion":"3.0.0", "MaxWebOSVersion":"3.0.9", "DeviceCompatibility":["TouchPad","Touchpad Go"], "PostInstallFlags":"RestartDevice", "PostUpdateFlags":"RestartDevice", "License":"GPL" }

@@ -1,15 +1,23 @@
 # Distributing the Bluetooth gamepad stack as a Preware IPK
 
-Plan for turning the working `webos-bt-shim` setup into something other TouchPad
-owners can install through Preware / WebOS Quick Install. Everything below is
-validated on our dev unit; none of the *packaging* is built yet.
+Design rationale + roadmap for shipping the `bluetooth-shim` setup to other
+TouchPad owners via Preware / WebOS Quick Install.
+
+> **Status (2026-07-28): the MVP is built and validated.** The package
+> `org.webosarchive.btgamepad` (built into `ipks/`, see
+> `bluetooth-shim/packaging/`) installs all the changes below, was verified
+> end-to-end via a clean WOSQI install on a fresh device (install → reboot →
+> pair a DS4 from "Other" → auto-connect), and carries a feed stanza for the
+> WOSA Modernize feed. What remains here is the **v1/stretch roadmap**
+> (broaden controller support, per-app jail scoping, publish the feed).
+> `bluetooth-shim/packaging/README.md` has the concrete build/install steps.
 
 ---
 
 ## 1. What actually has to land on a user's device
 
 The complete working state is six changes (see `DEVICE-STATE.md` #11–16 and the
-`webos-bt-shim/scripts`). An installer must reproduce all of them:
+`bluetooth-shim/scripts`). An installer must reproduce all of them:
 
 | # | Change | File(s) | Needs reboot? |
 |---|--------|---------|---------------|
@@ -46,7 +54,7 @@ Preware distributes several kinds. Two are relevant:
 
 **Recommendation: one self-contained IPKG that does all of #1–#5 in `postinst`.**
 We already have working, idempotent, reversible shell for every step in
-`webos-bt-shim/scripts/{deploy,undeploy,patch-bt-app,unpatch-bt-app}.sh` — the
+`bluetooth-shim/scripts/{deploy,undeploy,patch-bt-app,unpatch-bt-app}.sh` — the
 package scripts are those, minus novacom (they run *on* the device). Skipping the
 separate Preware-patch artifact keeps it to a single install/uninstall and one
 thing for the user to find. (A Preware "Patch" for #5 is a nice-to-have v2 so the
@@ -80,7 +88,7 @@ and proven — porting them is mechanical.
 3. **App-file patch vs sed.** The `com.palm.app.bluetoothtab` JS differs between
    3.0.4 / 3.0.5. Our `sed` edits are anchored on stable substrings and are
    version-tolerant; a unified-diff patch is not. Prefer the sed approach in postinst.
-4. **License to redistribute the shim.** Confirm `webos-bt-shim`'s license permits
+4. **License to redistribute the shim.** Confirm `bluetooth-shim`'s license permits
    redistribution of the built `.so`. We ship **only our own** binary — no Palm
    binary is redistributed (the shim is a clean-room LD_PRELOAD interposer), so
    there's no Palm-IP issue, but the shim's own license must allow it. Coordinate

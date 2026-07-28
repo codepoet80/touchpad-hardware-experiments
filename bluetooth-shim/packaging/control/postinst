@@ -1,0 +1,71 @@
+#!/bin/sh
+# postinst -- install the Bluetooth gamepad stack on-device.
+# Runs as root under ipkg/Preware. Idempotent and reversible (see prerm).
+# NOTE: does NOT reboot -- the reboot is declared in the package control's
+# Source JSON (PostInstallFlags:RestartDevice) so Preware can stack reboots.
+PID="org.webosarchive.btgamepad"
+[ -z "$IPKG_OFFLINE_ROOT" ] && IPKG_OFFLINE_ROOT=/media/cryptofs/apps
+mount -o remount,rw / 2>/dev/null || true
+
+# locate our payload (offline-root aware, like other feed packages)
+SRC=""
+for R in "$IPKG_OFFLINE_ROOT" /media/cryptofs/apps /var ""; do
+    [ -f "$R/usr/palm/applications/$PID/files/libpmbtgamepad.so" ] && { SRC="$R/usr/palm/applications/$PID/files"; break; }
+done
+[ -n "$SRC" ] || { echo "ERROR: btgamepad payload not found"; exit 1; }
+
+# 1. the shim
+cp -f "$SRC/libpmbtgamepad.so" /usr/lib/libpmbtgamepad.so
+chmod 644 /usr/lib/libpmbtgamepad.so
+
+# 2. udev rule: make the gamepad node 0666 so jailed (uid 5003) apps can read it
+cp -f "$SRC/99-bt-gamepad.rules" /etc/udev/rules.d/99-bt-gamepad.rules
+chmod 644 /etc/udev/rules.d/99-bt-gamepad.rules
+/sbin/udevcontrol reload_rules 2>/dev/null || true
+
+# 3. expose /dev/input inside the PDK app jail (idempotent; backup once)
+if ! grep -q "mount ro /dev/input" /etc/jail_pdk.conf; then
+    [ -f /etc/jail_pdk.conf.btshim-orig ] || cp /etc/jail_pdk.conf /etc/jail_pdk.conf.btshim-orig
+    awk '{print} /^mkdir \/dev$/ && !d {print "mkdir /dev/input"; print "mount ro /dev/input"; d=1}' \
+        /etc/jail_pdk.conf > /tmp/jpk.$$ && cp /tmp/jpk.$$ /etc/jail_pdk.conf && rm -f /tmp/jpk.$$
+fi
+
+# 4. Teach the Bluetooth settings app to CONNECT gamepads/mice over HID.
+#    Stock already lists a gamepad under "Other" and types it DEVICETYPE='Gamepad'
+#    -- users pair it from where it naturally appears. But three stock checks only
+#    ever act on keyboards, so a paired gamepad never HID-connects:
+#      (a) model connectHid() fires profconnect('hid') only if isKeyboard(cod)
+#      (b) the tap handler bails for non-Audio/Phone disconnected devices
+#      (c) inbound (press-the-pad's-button) reconnect auto-connects only keyboards
+#    Each guard keys on a string unique to the PATCHED result.
+BTROOT=/usr/palm/applications/com.palm.app.bluetoothtab/app
+BTMODEL="$BTROOT/models/Bluetooth.js"
+BTASSIST="$BTROOT/controllers/bluetooth-assistant.js"
+if [ -f "$BTMODEL" ] && [ -f "$BTASSIST" ]; then
+    [ -f "$BTMODEL.btshim-orig" ]  || cp "$BTMODEL" "$BTMODEL.btshim-orig"
+    [ -f "$BTASSIST.btshim-orig" ] || cp "$BTASSIST" "$BTASSIST.btshim-orig"
+    # (a) connectHid: accept gamepad/mouse -> enables auto-connect after pairing
+    grep -q "isKeyboard(device.cod) || isGamepad" "$BTMODEL" || \
+        sed -i 's/if( isKeyboard(device.cod)) {/if( isKeyboard(device.cod) || isGamepad(device.cod) || isMouse(device.cod)) {/' "$BTMODEL"
+    # (c) inbound HID reconnect: accept gamepad/mouse (press the pad button to reconnect)
+    grep -q "isGamepad(this.deviceCoD" "$BTMODEL" || \
+        sed -i 's/if(isKeyboard(this.deviceCoD\[payload.address\])){/if(isKeyboard(this.deviceCoD[payload.address]) || isGamepad(this.deviceCoD[payload.address]) || isMouse(this.deviceCoD[payload.address])){/' "$BTMODEL"
+    # (b) tap handler: let a disconnected Gamepad/Mouse fall through to connect
+    grep -q 'DEVICETYPE != "Gamepad"' "$BTASSIST" || \
+        sed -i 's/!= "Audio" \&\& device.DEVICETYPE != "Phone" \&\& /!= "Audio" \&\& device.DEVICETYPE != "Phone" \&\& device.DEVICETYPE != "Gamepad" \&\& device.DEVICETYPE != "Mouse" \&\& /' "$BTASSIST"
+fi
+
+# 5. LD_PRELOAD the shim into PmBtEngine + force sysrq off (backup once).
+#    Backup lives OUTSIDE /etc/event.d -- every file there races as an upstart job.
+[ -f /etc/bluetooth.upstart.btshim-orig ] || cp /etc/event.d/bluetooth /etc/bluetooth.upstart.btshim-orig
+cat > /etc/event.d/bluetooth <<'JOBEOF'
+description "Palm Bluetooth"
+
+start on stopped finish
+
+respawn
+exec /bin/sh -c 'echo 0 > /proc/sys/kernel/sysrq; export LD_PRELOAD=/usr/lib/libpmbtgamepad.so; export WEBOS_BT_SHIM_LOG=/var/log/btshim.log; export WEBOS_BT_SHIM_DUMP=0; exec /usr/bin/BluetoothMonitor'
+JOBEOF
+
+echo "btgamepad: installed. Reboot to activate (upstart job change needs a reboot)."
+exit 0

@@ -18,7 +18,7 @@ kernel consumes non-keyboard input, and nothing auto-mounts a disk.
 | USB mouse | works (evdev) | no | no mousedev, no cursor concept in webOS |
 | USB mass storage | works | no | mount by hand, full VFAT read/write |
 | Bluetooth keyboard | n/a | works | supported path, via Palm's stack |
-| Bluetooth gamepad | — | **works, fully** | real evdev gamepad node via `webos-bt-shim/` — all buttons, sticks, analog triggers |
+| Bluetooth gamepad | — | **works, fully** | real evdev gamepad node via `bluetooth-shim/` — all buttons, sticks, analog triggers |
 | Bluetooth LE anything | — | no | 2011 stack predates BLE |
 
 ## Tools
@@ -72,22 +72,24 @@ Palm ships a closed userspace CSR Synergy stack — `PmBtStack` + `PmBtEngine`
 discovery, and pairing are all scriptable; recipes are in `DEVICE-STATE.md`.
 The Settings app's `Bluetooth.js` is the API rosetta stone.
 
-### SOLVED PROPERLY (2026-07-27 evening): webos-bt-shim
+### SOLVED PROPERLY: bluetooth-shim
 
-The real fix is **[`webos-bt-shim/`](webos-bt-shim/)** (Herrie's LD_PRELOAD
-interposer on `libPmBtBsaif.so`'s HID→uinput bridge, plus our hardware-bringup
-fixes on branch `ds4-hardware-bringup`). A DualShock 4 now appears as a true
-gamepad evdev node — **14/14 buttons, both sticks, both analog triggers, and
-the d-pad hat, all verified on hardware** — with no keycode leakage into the
-UI and no sysrq exposure (the node has no kbd handler at all). Key hardware
-findings, in `webos-bt-shim`'s commit log and `BT-GAMEPAD-LESSONS.md`:
+The real fix is **[`bluetooth-shim/`](bluetooth-shim/)**, an LD_PRELOAD
+interposer on `libPmBtBsaif.so`'s HID→uinput bridge. It began from the original
+interposer concept by **Herrie** (webOS community), which we carried the rest of
+the way: report-framing fix, descriptor-cache recovery, the PDK-jail and udev
+work, the Bluetooth settings-app connect edits, and a deployable Preware package.
+A DualShock 4 now appears as a true gamepad evdev node — **14/14 buttons, both
+sticks, both analog triggers, and the d-pad hat, all verified on hardware** —
+with no keycode leakage into the UI and no sysrq exposure (the node has no kbd
+handler at all). Key hardware findings, documented in `bluetooth-shim/`:
 
 * Reports arrive framed `[0xA1][report-id][payload]` — decoders must skip the
   HIDP header (Palm's own boot-keyboard parser confirms this framing).
 * The `/var/hid.j` descriptor cache is irreparably corrupt by design (written
   as unpadded `%x`, read back with hex letters zeroed) — the shim recovers via
   a built-in per-VID/PID descriptor. Keep a copy of the DS4 record
-  (`webos-bt-shim/docs/ds4-hid.j-record.json`): unpairing deletes `/var/hid.j`,
+  (`bluetooth-shim/docs/ds4-hid.j-record.json`): unpairing deletes `/var/hid.j`,
   and `profconnect` fails `no sdpInfo` without it (the incoming-pairing popup
   never runs the HID SDP query).
 * `PmBtEngine` dies mid-session if the display sleeps (suspend churn) — any
@@ -179,7 +181,7 @@ not fix this — Palm's stack also injects into hidd's private sockets
 device on every reconnect, silently invalidating any existing grab.
 
 **The fix is structural: the app takes the screen first, then establishes the
-connection.** `btwizard/` implements it — an SDL app that goes fullscreen, walks
+connection.** `bt-wizard/` implements it — an SDL app that goes fullscreen, walks
 the user through pairing, patches and reloads the cached record, prompts for the
 PS button, then grabs and decodes. Because the app is already focused, the
 launcher never sees a single keycode. There is no race to win: the app was there

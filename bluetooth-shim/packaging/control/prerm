@@ -1,0 +1,33 @@
+#!/bin/sh
+# prerm -- fully revert what postinst did. Restores every backup; the shim never
+# modifies a shipped binary on disk, so after removal + reboot the device is
+# bit-for-bit stock Bluetooth. (A reboot is needed to unload the running shim.)
+mount -o remount,rw / 2>/dev/null || true
+
+# restore the stock Bluetooth upstart job
+[ -f /etc/bluetooth.upstart.btshim-orig ] && mv -f /etc/bluetooth.upstart.btshim-orig /etc/event.d/bluetooth
+
+# remove the shim + udev rule
+rm -f /usr/lib/libpmbtgamepad.so
+rm -f /etc/udev/rules.d/99-bt-gamepad.rules
+/sbin/udevcontrol reload_rules 2>/dev/null || true
+
+# restore the PDK jail
+if [ -f /etc/jail_pdk.conf.btshim-orig ]; then
+    mv -f /etc/jail_pdk.conf.btshim-orig /etc/jail_pdk.conf
+else
+    sed -i '/^mkdir \/dev\/input$/d; /^mount ro \/dev\/input$/d' /etc/jail_pdk.conf
+fi
+
+# restore the Bluetooth settings app (model + assistant)
+BTROOT=/usr/palm/applications/com.palm.app.bluetoothtab/app
+BTMODEL="$BTROOT/models/Bluetooth.js"
+BTASSIST="$BTROOT/controllers/bluetooth-assistant.js"
+[ -f "$BTMODEL.btshim-orig" ]  && mv -f "$BTMODEL.btshim-orig" "$BTMODEL"
+[ -f "$BTASSIST.btshim-orig" ] && mv -f "$BTASSIST.btshim-orig" "$BTASSIST"
+# clean up any DeviceClass.js backup from the pre-1.1.0 (wrong) approach
+BTCTRL="$BTROOT/controllers"
+[ -f "$BTCTRL/DeviceClass.js.btshim-orig" ] && mv -f "$BTCTRL/DeviceClass.js.btshim-orig" "$BTCTRL/DeviceClass.js"
+
+echo "btgamepad: removed. Reboot to fully unload."
+exit 0

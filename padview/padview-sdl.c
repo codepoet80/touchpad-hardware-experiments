@@ -83,7 +83,7 @@ static int bt_open(void)
     int fd, i, one = 1;
     for (i = 0; i < 16; i++) {
         snprintf(path, sizeof(path), "/dev/input/event%d", i);
-        fd = open(path, O_RDONLY);
+        fd = open(path, O_RDONLY | O_NONBLOCK);
         if (fd < 0) continue;
         if (ioctl(fd, EVIOCGID, &id) == 0 && id.bustype == 0x0005) {
             name[0] = 0;
@@ -160,20 +160,33 @@ int main(int argc, char **argv)
                 running = 0;
 
         if (btfd >= 0) {
+            /* Wait briefly for input, then DRAIN THE WHOLE QUEUE before
+               drawing. The DS4 streams ~90 frames/s and a fullscreen software
+               flip is slow; reading a fixed chunk per frame let the queue
+               backlog grow unboundedly (20s visual lag) until the kernel's
+               evdev buffer overflowed and silently dropped events — including
+               releases, which is exactly "stuck buttons" (no SYN_DROPPED on
+               2.6.35 to warn us). Always render the freshest state instead. */
             FD_ZERO(&rs); FD_SET(btfd, &rs);
-            if (select(btfd + 1, &rs, 0, 0, &tv) > 0) {
-                struct input_event iev[32];
+            select(btfd + 1, &rs, 0, 0, &tv);
+            for (;;) {
+                struct input_event iev[64];
                 int n = read(btfd, iev, sizeof(iev)), k;
-                if (n <= 0 && errno != EAGAIN && errno != EINTR) {
-                    /* pad slept / engine restarted: the shim tears the uinput
-                       node down and re-creates it on reconnect. Drop the stale
-                       fd and re-acquire below. */
-                    fprintf(stderr, "pad went away (%s) - will re-grab\n",
-                            strerror(errno));
-                    close(btfd); btfd = -1;
+                if (n > 0) {
+                    for (k = 0; k < n / (int)sizeof(iev[0]); k++)
+                        pad_feed(&iev[k]);
+                    if (n == (int)sizeof(iev)) continue;   /* maybe more */
+                    break;
                 }
-                for (k = 0; k < n / (int)sizeof(iev[0]); k++)
-                    pad_feed(&iev[k]);
+                if (n < 0 && (errno == EAGAIN || errno == EINTR))
+                    break;                                  /* queue drained */
+                /* pad slept / engine restarted: the shim tears the uinput
+                   node down and re-creates it on reconnect. Drop the stale
+                   fd and re-acquire below. */
+                fprintf(stderr, "pad went away (%s) - will re-grab\n",
+                        n < 0 ? strerror(errno) : "EOF");
+                close(btfd); btfd = -1;
+                break;
             }
         } else {
             static time_t last_try;

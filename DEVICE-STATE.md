@@ -21,6 +21,8 @@ Last updated: 2026-07-27.
 | 11 | **webos-bt-shim installed** (2026-07-27): `/usr/lib/libpmbtgamepad.so`; `/etc/event.d/bluetooth` replaced with LD_PRELOAD wrapper (also forces sysrq=0 at BT start); original job backed up at `/etc/bluetooth.upstart.btshim-orig` (deliberately OUTSIDE /etc/event.d) | Yes | `cp /etc/bluetooth.upstart.btshim-orig /etc/event.d/bluetooth; rm /usr/lib/libpmbtgamepad.so` + reboot, or `webos-bt-shim/scripts/undeploy.sh` |
 | 12 | BT settings app patched so mice/gamepads pair via the keyboard HID path: `DeviceClass.js` + `bluetooth-assistant.js` in `/usr/palm/applications/com.palm.app.bluetoothtab/app/controllers/` (backups `*.btshim-orig` alongside) | Yes | `webos-bt-shim/scripts/unpatch-bt-app.sh` |
 | 13 | `/var/log/btshim.log` — shim log, dump mode ON (per-report hexdumps). Disable dump: `touch /var/btshim-nodump; killall PmBtEngine` | Yes | `rm /var/log/btshim.log` |
+| 14 | `/etc/udev/rules.d/99-bt-gamepad.rules` — makes the "Wireless Controller" evdev node 0666 so launcher-jailed (uid 5003) apps can read it | Yes | `webos-bt-shim/scripts/undeploy.sh` or `rm` it + `udevcontrol reload_rules` |
+| 15 | Clone Keen installed with Bluetooth gamepad support: app `com.cmdrkeen.game` v1.3.0 at `/media/cryptofs/apps/usr/palm/applications/com.cmdrkeen.game` | Yes | `palm-install -r com.cmdrkeen.game` |
 
 Note: #7 is superseded — radio is ON, DS4 re-paired (2026-07-27) and **fully working
 as a gamepad through the shim** (14 buttons, 2 sticks, analog triggers, hat verified).

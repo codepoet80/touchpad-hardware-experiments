@@ -21,11 +21,105 @@
 #include <sys/select.h>
 #include <linux/fb.h>
 #include <linux/input.h>
+#include <errno.h>
 
 #define MAXDEV 8
 #define NBTN 20            /* BTN_JOYSTICK 0x120 .. 0x133.. covers both pads */
 #define BTN_BASE_A 0x120   /* classic joystick range */
 #define BTN_BASE_B 0x130   /* gamepad range (DS4) */
+
+
+/* ---------------- Bluetooth pad (via Palm's mangled keyboard stream) -------
+ * Palm's BT stack runs a gamepad's HID reports through its *keyboard* parser
+ * (see README / padkeys). We grab that device so webOS never sees the raw
+ * keycodes, then reconstruct what the report actually said:
+ *   report byte 0   -> the 8 modifier bits            (full 8-bit value)
+ *   report bytes 2+ -> HID usages -> keycodes         (partially recoverable)
+ * One of those usage values is the DS4 button byte: low nibble = d-pad hat
+ * (8 = released), high nibble = Square/Cross/Circle/Triangle.
+ */
+static const unsigned char hid_keyboard[256] = {
+      0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
+     50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,  2,  3,
+      4,  5,  6,  7,  8,  9, 10, 11, 28,  1, 14, 15, 57, 12, 13, 26,
+     27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
+     65, 66, 67, 68, 87, 88, 99, 70,119,110,102,104,111,107,109,106,
+    105,108,103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71,
+     72, 73, 82, 83, 86,127,116,117,183,184,185,186,187,188,189,190,
+    191,192,193,194,134,138,130,132,128,129,131,137,133,135,136,113,
+    115,114,  0,  0,  0,121,  0, 89, 93,124, 92, 94, 95,  0,  0,  0,
+    122,123, 90, 91, 85,  0,  0,  0,  0,  0,  0,  0,111,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+     29, 42, 56,125, 97, 54,100,126,  0,  0,  0,  0,  0,  0,  0,  0,
+    150,158,159,128,136,177,178,176,142,152,173,140,  0,  0,  0,  0
+};
+static const int mod_keys[8] = { 29, 42, 56, 125, 97, 54, 100, 126 };
+
+static int btfd = -1;
+static unsigned char bt_byte0 = 127;
+static unsigned char bt_usage[8]; static int bt_nusage = 0;
+static int bt_bbyte = 0x08;
+
+static int keycode_to_usage(int kc)
+{
+    int u;
+    for (u = 4; u < 232; u++) if (hid_keyboard[u] == kc) return u;
+    return -1;
+}
+
+static void bt_feed(int code, int val)
+{
+    int i, u;
+    for (i = 0; i < 8; i++)
+        if (mod_keys[i] == code) {
+            if (val) bt_byte0 |=  (1 << i);
+            else     bt_byte0 &= ~(1 << i);
+            return;
+        }
+    u = keycode_to_usage(code);
+    if (u < 0) return;
+    /* Track the button byte without latching: the most recent legal value wins,
+       and releasing the current one falls back to neutral. Keeping a persistent
+       "pressed set" meant a single missed release froze the pad. */
+    if ((u & 0x0f) <= 8) {
+        if (val)                 bt_bbyte = u;
+        else if (u == bt_bbyte)  bt_bbyte = 0x08;
+    }
+    (void)bt_usage; (void)bt_nusage;
+}
+
+static int bt_buttons(void) { return bt_bbyte; }
+
+static int bt_open(void)
+{
+    char path[32], name[64];
+    struct input_id id;
+    int fd, i, one = 1;
+    for (i = 0; i < 16; i++) {
+        snprintf(path, sizeof(path), "/dev/input/event%d", i);
+        fd = open(path, O_RDONLY);
+        if (fd < 0) continue;
+        if (ioctl(fd, EVIOCGID, &id) == 0 && id.bustype == 0x0005) {
+            name[0] = 0;
+            ioctl(fd, EVIOCGNAME(sizeof(name)), name);
+            if (strstr(name, "Wireless Controller") || id.vendor == 0x054c) {
+                if (ioctl(fd, EVIOCGRAB, &one) < 0)
+                    fprintf(stderr, "padview: WARNING grab FAILED on %s (%s) - "
+                                    "webOS will still see raw keys\n",
+                            path, strerror(errno));
+                else
+                    fprintf(stderr, "padview: bluetooth pad on %s (%s) - grabbed\n",
+                            path, name);
+                return fd;
+            }
+        }
+        close(fd);
+    }
+    return -1;
+}
 
 static uint32_t *fb;
 static struct fb_var_screeninfo vi;
@@ -35,6 +129,26 @@ static int fbfd, stride_px, W, H;
 static int axes[8] = {128,128,128,128,128,128,0,0}; /* 0..5 analog, 6..7 hat */
 static int amin[8] = {0,0,0,0,0,0,-1,-1}, amax[8] = {255,255,255,255,255,255,1,1};
 static int hat_seen = 0, btns[NBTN];
+
+/* Push the reconstructed BT state into padview's normal axis/button state so
+   the existing drawing code renders it unchanged. */
+static void bt_to_state(void)
+{
+    static const signed char hatx[9] = { 0, 1, 1, 1, 0,-1,-1,-1, 0 };
+    static const signed char haty[9] = {-1,-1, 0, 1, 1, 1, 0,-1, 0 };
+    int b = bt_buttons(), hat;
+    axes[0] = bt_byte0;                 /* the one fully-recoverable axis */
+    if (b >= 0) {
+        hat = b & 0x0f; if (hat > 8) hat = 8;
+        axes[6] = hatx[hat];
+        axes[7] = haty[hat];
+        hat_seen = 1;
+        btns[16] = !!(b & 0x10);        /* Square   */
+        btns[17] = !!(b & 0x20);        /* Cross    */
+        btns[18] = !!(b & 0x40);        /* Circle   */
+        btns[19] = !!(b & 0x80);        /* Triangle */
+    }
+}
 
 static uint32_t *page(void)
 {
@@ -168,7 +282,8 @@ int main(int argc, char **argv)
             } else close(fd);
         }
     }
-    if (!nfd) { fprintf(stderr, "padview: no gamepad found\n"); return 1; }
+    btfd = bt_open();
+    if (!nfd && btfd < 0) { fprintf(stderr, "padview: no gamepad found\n"); return 1; }
 
     fbfd = open("/dev/fb0", O_RDWR);
     if (fbfd < 0) { perror("fb0"); return 1; }
@@ -189,6 +304,16 @@ int main(int argc, char **argv)
         for (i = 0; i < nfd; i++) {
             FD_SET(fds[i], &rs);
             if (fds[i] > mx) mx = fds[i];
+        }
+        if (btfd >= 0) { FD_SET(btfd, &rs); if (btfd > mx) mx = btfd; }
+        if (btfd >= 0) {
+            struct input_event ev[32];
+            int n, k;
+            if (FD_ISSET(btfd, &rs) && (n = read(btfd, ev, sizeof(ev))) > 0) {
+                for (k = 0; k < n / (int)sizeof(ev[0]); k++)
+                    if (ev[k].type == EV_KEY) bt_feed(ev[k].code, ev[k].value);
+                bt_to_state();
+            }
         }
         if (select(mx + 1, &rs, 0, 0, &tv) > 0)
             for (i = 0; i < nfd; i++)

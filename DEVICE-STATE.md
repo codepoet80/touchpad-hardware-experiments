@@ -16,6 +16,30 @@ Last updated: 2026-07-27.
 | 6 | `/usr/local/bin/padkeys` and `/usr/local/bin/padview` installed (see README) | Yes | `rm /usr/local/bin/padkeys /usr/local/bin/padview` |
 | 7 | Bluetooth: DS4 pairing removed, radio turned off, debug zones reset — **device left as found** | n/a | re-enable with `btmonitor/monitor/radioon` |
 | 8 | `/var/log/bt.log` contains this session's HID debug trace | Yes (log rotation clears it) | `rm /var/log/bt.log` |
+| 9 | Kernel Bluetooth modules loaded at runtime (bluetooth, l2cap, hidp, hci_vhci, hci_uart) — see BLUETOOTH-KERNEL.md | No (gone at reboot) | `rmmod hci_uart hci_vhci hidp l2cap bluetooth` |
+| 10 | Binaries in /tmp: btbridge, btctl, btprobe, padkeys, padview | No (/tmp clears at reboot) | — |
+| 11 | **webos-bt-shim installed** (2026-07-27): `/usr/lib/libpmbtgamepad.so`; `/etc/event.d/bluetooth` replaced with LD_PRELOAD wrapper (also forces sysrq=0 at BT start); original job backed up at `/etc/bluetooth.upstart.btshim-orig` (deliberately OUTSIDE /etc/event.d) | Yes | `cp /etc/bluetooth.upstart.btshim-orig /etc/event.d/bluetooth; rm /usr/lib/libpmbtgamepad.so` + reboot, or `webos-bt-shim/scripts/undeploy.sh` |
+| 12 | BT settings app patched so mice/gamepads pair via the keyboard HID path: `DeviceClass.js` + `bluetooth-assistant.js` in `/usr/palm/applications/com.palm.app.bluetoothtab/app/controllers/` (backups `*.btshim-orig` alongside) | Yes | `webos-bt-shim/scripts/unpatch-bt-app.sh` |
+| 13 | `/var/log/btshim.log` — shim log, dump mode ON (per-report hexdumps). Disable dump: `touch /var/btshim-nodump; killall PmBtEngine` | Yes | `rm /var/log/btshim.log` |
+
+Note: #7 is superseded — radio is ON, DS4 re-paired (2026-07-27) and **fully working
+as a gamepad through the shim** (14 buttons, 2 sticks, analog triggers, hat verified).
+Live `libPmBtBsaif.so` verified identical to `.orig` (stock).
+`/var/hid.j` was hand-restored from a captured copy (the record in
+`webos-bt-shim` bringup notes) — KEEP A COPY: unpairing deletes it, and without it
+`profconnect` fails "no sdpInfo" (the incoming-pairing popup never fetches SDP).
+`/var/btshim-nodump` is set (shim log quiet from next engine start; delete + killall
+PmBtEngine for raw report dumps). /tmp helpers from the bringup session
+(evwatch.sh, keepawake.sh, connect-once.sh, captures) clear at reboot; keepawake
+stopped via /tmp/stop-awake.
+**Operational notes:** PmBtEngine dies during active HID sessions if the display
+sleeps (suspend churn) — any fullscreen app / keepawake prevents it, and deaths
+self-heal (respawn + auto-reconnect + shim re-takeover). To reconnect the DS4:
+just press PS (device-initiated; uses hid.j + link key).
+
+Palm's Bluetooth stack was restored and verified working after the kernel experiments
+(radio on, adapter address readable). The kernel modules coexist with it harmlessly —
+they only take over if `btbridge` is run, which requires stopping Palm's stack first.
 
 Notes:
 - While in host mode (#4): no charging via the USB port, no novacom-over-USB, no USB drive

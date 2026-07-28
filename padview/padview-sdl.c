@@ -1,17 +1,22 @@
 /*
  * padview-sdl — live game-controller visualizer for webOS (HP TouchPad)
  *
- * The earlier padview drew straight to /dev/fb0, which fights LunaSysMgr for
- * the screen: the TouchPad has a 3-layer compositor (background / application /
- * UI) and anything bypassing it flickers continuously. SDL is the only context
- * owner that integrates correctly with that compositor, so this version renders
- * through SDL instead and sits still.
+ * 2026-07-27: rewritten for the webos-bt-shim era. The Bluetooth pad is now a
+ * REAL gamepad evdev node ("Wireless Controller", BUS_BLUETOOTH, 054c:05c4):
+ * BTN_SOUTH..0x13d buttons, ABS_X/Y (left stick), ABS_Z/ABS_RZ (right stick),
+ * ABS_RX/ABS_RY (analog triggers), ABS_HAT0X/Y (d-pad). No more decoding
+ * Palm's mangled keyboard channel — that era is preserved in git history.
+ *
+ * SDL is the only context owner that integrates with the TouchPad's 3-layer
+ * compositor, so we render through SDL (fullscreen) rather than /dev/fb0.
  *
  * Run it as root straight from a novacom shell (NOT from the launcher) — the
  * launcher jails PDK apps as uid 5003, which cannot open /dev/input/event*.
  *
- * Build (see build-sdl.sh):
- *   arm-linux-gnueabi-gcc -O2 -mcpu=cortex-a8 -mfloat-abi=softfp \
+ * Build — MUST use the Linaro toolchain; the distro arm-linux-gnueabi-gcc
+ * stamps a min-kernel of 3.2.0 and the loader refuses it on 2.6.35:
+ *   /opt/gcc-linaro-4.9.4-2017.01-x86_64_arm-linux-gnueabi/bin/arm-linux-gnueabi-gcc \
+ *     -O2 -mcpu=cortex-a8 -mfloat-abi=softfp \
  *     -I/opt/PalmPDK/include -I/opt/PalmPDK/include/SDL \
  *     -L/opt/PalmPDK/device/lib -lSDL -lpdl -o padview-sdl padview-sdl.c
  */
@@ -31,95 +36,43 @@
 #define SCRW 1024
 #define SCRH 768
 
-/* ---- Bluetooth pad, via Palm's mangled keyboard stream (see README) ------
- * Palm's BT stack runs a gamepad's HID reports through its *keyboard* parser.
- * report byte 0   -> the 8 modifier bits            (full 8-bit value)
- * report bytes 2+ -> HID usages -> keycodes         (partly recoverable)
- * One usage value is the DS4 button byte: low nibble = d-pad hat (8 = released),
- * high nibble = Square 0x10 / Cross 0x20 / Circle 0x40 / Triangle 0x80.
- */
-static const unsigned char hid_keyboard[256] = {
-      0,  0,  0,  0, 30, 48, 46, 32, 18, 33, 34, 35, 23, 36, 37, 38,
-     50, 49, 24, 25, 16, 19, 31, 20, 22, 47, 17, 45, 21, 44,  2,  3,
-      4,  5,  6,  7,  8,  9, 10, 11, 28,  1, 14, 15, 57, 12, 13, 26,
-     27, 43, 43, 39, 40, 41, 51, 52, 53, 58, 59, 60, 61, 62, 63, 64,
-     65, 66, 67, 68, 87, 88, 99, 70,119,110,102,104,111,107,109,106,
-    105,108,103, 69, 98, 55, 74, 78, 96, 79, 80, 81, 75, 76, 77, 71,
-     72, 73, 82, 83, 86,127,116,117,183,184,185,186,187,188,189,190,
-    191,192,193,194,134,138,130,132,128,129,131,137,133,135,136,113,
-    115,114,  0,  0,  0,121,  0, 89, 93,124, 92, 94, 95,  0,  0,  0,
-    122,123, 90, 91, 85,  0,  0,  0,  0,  0,  0,  0,111,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-      0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
-     29, 42, 56,125, 97, 54,100,126,  0,  0,  0,  0,  0,  0,  0,  0,
-    150,158,159,128,136,177,178,176,142,152,173,140,  0,  0,  0,  0
-};
-static const int mod_keys[8] = { 29, 42, 56, 125, 97, 54, 100, 126 };
+/* ---- pad state (DS4 via webos-bt-shim) -------------------------------- */
+/* sticks + triggers, 0..255 */
+static int ax_lx = 128, ax_ly = 128, ax_rx = 128, ax_ry = 128;
+static int ax_l2 = 0,  ax_r2 = 0;
+static int hatx = 0, haty = 0;                    /* -1..1 */
+#define NBTN 14
+/* index = BTN code - 0x130; DS4 order via shim's pad_btn table:
+ * 0 Square 1 Cross 2 Circle 3 Triangle 4 L1 5 R1 6 L2 7 R2
+ * 8 Share 9 Options 10 L3 11 R3 12 PS 13 Touchpad-click */
+static int btn[NBTN];
 
-static int  btfd = -1;
-static unsigned char bt_byte0 = 127;
-static int  bt_bbyte = 0x08;
+static int btfd = -1;
 
-/* Mouse-mode state. With subClass=128 Palm's stack runs the pad's reports
-   through its *mouse* parser instead: report byte 0 -> up to 3 button bits,
-   bytes 1 and 2 -> X and Y, passed through as full 8-bit values with none of
-   the usage->keycode mangling the keyboard path suffers. webOS has no mouse
-   support at all, so these events are invisible to the UI - no volume chaos. */
-static int bt_relx, bt_rely, bt_mbtn[3];
-static int bt_saw_rel = 0;
-
-/* We patch the library's own usage->keycode table on the device (see README):
-   the DS4 button-byte values are remapped onto F13..F24 + spares, which webOS
-   ignores completely, and the noisy stick-centre values are silenced. That kills
-   the volume/launcher chaos at the source AND makes the decode unambiguous —
-   no more guessing which usage value is the button byte. */
-static int keycode_to_usage(int kc)
+static void pad_reset(void)
 {
-    static const struct { int kc, usage; } patched[] = {
-        {183,0x00},{184,0x01},{185,0x02},{186,0x03},{187,0x04},
-        {188,0x05},{189,0x06},{190,0x07},{191,0x08},          /* d-pad hat   */
-        {192,0x18},{193,0x28},{194,0x48},{195,0x88},          /* face buttons*/
-    };
-    int i, u;
-    if (kc == 199) return -1;          /* our "quiet" code: deliberate noise */
-    for (i = 0; i < (int)(sizeof(patched)/sizeof(patched[0])); i++)
-        if (patched[i].kc == kc) return patched[i].usage;
-    for (u = 4; u < 232; u++) if (hid_keyboard[u] == kc) return u;
-    return -1;
+    ax_lx = ax_ly = ax_rx = ax_ry = 128;
+    ax_l2 = ax_r2 = 0;
+    hatx = haty = 0;
+    memset(btn, 0, sizeof(btn));
 }
 
-static void bt_feed(int code, int val)
+static void pad_feed(const struct input_event *e)
 {
-    int i, u;
-    for (i = 0; i < 8; i++)
-        if (mod_keys[i] == code) {
-            if (val) bt_byte0 |=  (1 << i);
-            else     bt_byte0 &= ~(1 << i);
-            return;
+    if (e->type == EV_KEY) {
+        int i = e->code - 0x130;                  /* BTN_SOUTH.. */
+        if (i >= 0 && i < NBTN) btn[i] = e->value;
+    } else if (e->type == EV_ABS) {
+        switch (e->code) {
+        case ABS_X:     ax_lx = e->value; break;
+        case ABS_Y:     ax_ly = e->value; break;
+        case ABS_Z:     ax_rx = e->value; break;  /* right stick X */
+        case ABS_RZ:    ax_ry = e->value; break;  /* right stick Y */
+        case ABS_RX:    ax_l2 = e->value; break;  /* L2 analog */
+        case ABS_RY:    ax_r2 = e->value; break;  /* R2 analog */
+        case ABS_HAT0X: hatx  = e->value; break;
+        case ABS_HAT0Y: haty  = e->value; break;
         }
-    u = keycode_to_usage(code);
-    if (u < 0) return;
-    /* Identify the DS4 button byte among the surviving usage values.
-     * At rest, and whenever the d-pad is released, its low nibble is exactly 8
-     * (hat = released), so face buttons appear as 0x18/0x28/0x48/0x88. Merely
-     * requiring "low nibble <= 8" let an analog axis drifting through 0x81 pose
-     * as the button byte, which is why buttons only worked intermittently.
-     * A d-pad press drops the nibble below 8 but leaves the face bits alone,
-     * so accept that only as a delta from the byte we are already tracking. */
-    if (val) {
-        if ((u & 0x0f) == 8)                                   /* hat released */
-            bt_bbyte = u;
-        else if ((u & 0x0f) < 8 && (u & 0xf0) == (bt_bbyte & 0xf0))
-            bt_bbyte = u;                                      /* hat pressed  */
-    } else if (u == bt_bbyte) {
-        /* Releasing the tracked value means the button byte changed. Fall back
-           to fully-neutral rather than trying to preserve the face bits:
-           (u & 0xf0) | 0x08 returns the *same* value for a face button, which
-           left it latched on forever. If a new value is genuinely still held,
-           its own press event arrives immediately and re-sets this. */
-        bt_bbyte = 0x08;
     }
 }
 
@@ -136,10 +89,12 @@ static int bt_open(void)
             name[0] = 0;
             ioctl(fd, EVIOCGNAME(sizeof(name)), name);
             if (strstr(name, "Wireless Controller") || id.vendor == 0x054c) {
+                /* grab is optional now (nothing else consumes BTN events),
+                   but keeps other experiments from interfering */
                 if (ioctl(fd, EVIOCGRAB, &one) < 0)
-                    fprintf(stderr, "grab FAILED on %s: %s\n", path, strerror(errno));
-                else
-                    fprintf(stderr, "bluetooth pad on %s (%s) - grabbed\n", path, name);
+                    fprintf(stderr, "grab failed on %s: %s (continuing)\n",
+                            path, strerror(errno));
+                fprintf(stderr, "gamepad on %s (%s)\n", path, name);
                 return fd;
             }
         }
@@ -165,7 +120,7 @@ static void outline(int x, int y, int w, int h, int t, Uint32 c)
 
 int main(int argc, char **argv)
 {
-    Uint32 BG, BOX, DOT, ON, OFF, DP;
+    Uint32 BG, BOX, DOT, ON, OFF, DP, LIVE, DEAD;
     int running = 1, secs = 0;
     time_t end;
 
@@ -180,24 +135,24 @@ int main(int argc, char **argv)
     if (!scr) { fprintf(stderr, "SDL_SetVideoMode: %s\n", SDL_GetError()); return 1; }
     SDL_ShowCursor(SDL_DISABLE);
 
-    BG  = SDL_MapRGB(scr->format, 0x10, 0x10, 0x18);
-    BOX = SDL_MapRGB(scr->format, 0x40, 0x40, 0x58);
-    DOT = SDL_MapRGB(scr->format, 0x40, 0xC0, 0xFF);
-    ON  = SDL_MapRGB(scr->format, 0xFF, 0xB0, 0x20);
-    OFF = SDL_MapRGB(scr->format, 0x30, 0x30, 0x40);
-    DP  = SDL_MapRGB(scr->format, 0xFF, 0x50, 0x60);
+    BG   = SDL_MapRGB(scr->format, 0x10, 0x10, 0x18);
+    BOX  = SDL_MapRGB(scr->format, 0x40, 0x40, 0x58);
+    DOT  = SDL_MapRGB(scr->format, 0x40, 0xC0, 0xFF);
+    ON   = SDL_MapRGB(scr->format, 0xFF, 0xB0, 0x20);
+    OFF  = SDL_MapRGB(scr->format, 0x30, 0x30, 0x40);
+    DP   = SDL_MapRGB(scr->format, 0xFF, 0x50, 0x60);
+    LIVE = SDL_MapRGB(scr->format, 0x30, 0xD0, 0x60);
+    DEAD = SDL_MapRGB(scr->format, 0xC0, 0x30, 0x30);
 
     btfd = bt_open();
-    if (btfd < 0) fprintf(stderr, "no bluetooth pad found (press PS?)\n");
+    if (btfd < 0) fprintf(stderr, "no gamepad found (press PS?)\n");
 
     end = time(NULL) + (secs ? secs : 100000);
     while (running && time(NULL) < end) {
         SDL_Event ev;
         fd_set rs;
         struct timeval tv = { 0, 16000 };
-        static const signed char hatx[9] = { 0, 1, 1, 1, 0,-1,-1,-1, 0 };
-        static const signed char haty[9] = {-1,-1, 0, 1, 1, 1, 0,-1, 0 };
-        int hat, b;
+        int i;
 
         while (SDL_PollEvent(&ev))
             if (ev.type == SDL_QUIT ||
@@ -210,34 +165,15 @@ int main(int argc, char **argv)
                 struct input_event iev[32];
                 int n = read(btfd, iev, sizeof(iev)), k;
                 if (n <= 0 && errno != EAGAIN && errno != EINTR) {
-                    /* The pad slept and reconnected: Palm's stack tears down the
-                       uinput device and makes a new one, so our grab died with
-                       it and webOS starts seeing the raw keys again. Drop the
-                       stale fd and re-acquire below. */
+                    /* pad slept / engine restarted: the shim tears the uinput
+                       node down and re-creates it on reconnect. Drop the stale
+                       fd and re-acquire below. */
                     fprintf(stderr, "pad went away (%s) - will re-grab\n",
                             strerror(errno));
                     close(btfd); btfd = -1;
                 }
-                for (k = 0; k < n / (int)sizeof(iev[0]); k++) {
-                    if (iev[k].type == EV_KEY) {
-                        int c = iev[k].code;
-                        if (c == BTN_LEFT)        bt_mbtn[0] = iev[k].value;
-                        else if (c == BTN_RIGHT)  bt_mbtn[1] = iev[k].value;
-                        else if (c == BTN_MIDDLE) bt_mbtn[2] = iev[k].value;
-                        else bt_feed(c, iev[k].value);
-                    } else if (iev[k].type == EV_REL) {
-                        bt_saw_rel = 1;
-                        if (iev[k].code == REL_X) {
-                            bt_relx += iev[k].value;
-                            if (bt_relx < 0) bt_relx = 0;
-                            if (bt_relx > 255) bt_relx = 255;
-                        } else if (iev[k].code == REL_Y) {
-                            bt_rely += iev[k].value;
-                            if (bt_rely < 0) bt_rely = 0;
-                            if (bt_rely > 255) bt_rely = 255;
-                        }
-                    }
-                }
+                for (k = 0; k < n / (int)sizeof(iev[0]); k++)
+                    pad_feed(&iev[k]);
             }
         } else {
             static time_t last_try;
@@ -245,7 +181,7 @@ int main(int argc, char **argv)
             if (time(NULL) != last_try) {        /* retry about once a second */
                 last_try = time(NULL);
                 btfd = bt_open();
-                if (btfd >= 0) { bt_byte0 = 127; bt_bbyte = 0x08; }
+                if (btfd >= 0) pad_reset();
             }
         }
 
@@ -261,51 +197,57 @@ int main(int argc, char **argv)
             }
         }
 
-        b = bt_bbyte;
-        hat = b & 0x0f; if (hat > 8) hat = 8;
-
         SDL_FillRect(scr, NULL, BG);
 
-        /* the one fully-recoverable analog axis, as a dot in a box */
-        outline(80, 120, 320, 320, 4, BOX);
-        box(80 + (bt_byte0 * (320 - 24)) / 255, 260, 24, 24, DOT);
+        /* connection pip, top-right */
+        box(SCRW - 60, 24, 36, 36, btfd >= 0 ? LIVE : DEAD);
 
-        /* d-pad */
+        /* left stick */
+        outline(60, 110, 300, 300, 4, BOX);
+        box(60 + (ax_lx * (300 - 24)) / 255,
+            110 + (ax_ly * (300 - 24)) / 255, 24, 24, DOT);
+
+        /* right stick */
+        outline(380, 110, 300, 300, 4, BOX);
+        box(380 + (ax_rx * (300 - 24)) / 255,
+            110 + (ax_ry * (300 - 24)) / 255, 24, 24, DOT);
+
+        /* analog triggers as vertical fill bars: L2, R2 */
+        outline(730, 110, 50, 300, 4, BOX);
+        box(730, 110 + 300 - (ax_l2 * 300) / 255, 50, (ax_l2 * 300) / 255, ON);
+        outline(810, 110, 50, 300, 4, BOX);
+        box(810, 110 + 300 - (ax_r2 * 300) / 255, 50, (ax_r2 * 300) / 255, ON);
+
+        /* d-pad (hat) */
         {
-            int cx = 240, cy = 560, a = 44;
-            box(cx - a/2, cy - a - a/2, a, a, haty[hat] < 0 ? DP : OFF);  /* up */
-            box(cx - a/2, cy + a/2,     a, a, haty[hat] > 0 ? DP : OFF);  /* down */
-            box(cx - a - a/2, cy - a/2, a, a, hatx[hat] < 0 ? DP : OFF);  /* left */
-            box(cx + a/2, cy - a/2,     a, a, hatx[hat] > 0 ? DP : OFF);  /* right */
+            int cx = 210, cy = 580, a = 48;
+            box(cx - a/2, cy - a - a/2, a, a, haty < 0 ? DP : OFF);  /* up */
+            box(cx - a/2, cy + a/2,     a, a, haty > 0 ? DP : OFF);  /* down */
+            box(cx - a - a/2, cy - a/2, a, a, hatx < 0 ? DP : OFF);  /* left */
+            box(cx + a/2, cy - a/2,     a, a, hatx > 0 ? DP : OFF);  /* right */
         }
 
-        /* face buttons: Square, Cross, Circle, Triangle */
+        /* face buttons in diamond: Square(0) Cross(1) Circle(2) Triangle(3) */
         {
-            int i, bx = 620, by = 300;
-            static const int mask[4] = { 0x10, 0x20, 0x40, 0x80 };
-            for (i = 0; i < 4; i++) {
-                outline(bx + i * 90, by, 70, 70, 3, BOX);
-                box(bx + i * 90 + 6, by + 6, 58, 58, (b & mask[i]) ? ON : OFF);
-            }
+            int cx = 500, cy = 580, a = 56;
+            outline(cx - a - a/2 - 4, cy - a/2 - 4, a + 8, a + 8, 3, BOX);
+            box(cx - a - a/2, cy - a/2, a, a, btn[0] ? ON : OFF);   /* Square: left */
+            outline(cx - a/2 - 4, cy + a/2 - 4, a + 8, a + 8, 3, BOX);
+            box(cx - a/2, cy + a/2, a, a, btn[1] ? ON : OFF);       /* Cross: bottom */
+            outline(cx + a/2 - 4, cy - a/2 - 4, a + 8, a + 8, 3, BOX);
+            box(cx + a/2, cy - a/2, a, a, btn[2] ? ON : OFF);       /* Circle: right */
+            outline(cx - a/2 - 4, cy - a - a/2 - 4, a + 8, a + 8, 3, BOX);
+            box(cx - a/2, cy - a - a/2, a, a, btn[3] ? ON : OFF);   /* Triangle: top */
         }
 
-        /* mouse-mode: two clean axes as a second dot, plus its 3 button bits */
-        if (bt_saw_rel) {
-            outline(80, 120, 320, 320, 4, DOT);          /* mark box as live */
-            box(80 + (bt_relx * (320 - 24)) / 255,
-                120 + (bt_rely * (320 - 24)) / 255, 24, 24, ON);
-            {
-                int i;
-                for (i = 0; i < 3; i++)
-                    box(120 + i * 60, 660, 48, 48, bt_mbtn[i] ? ON : OFF);
-            }
-        }
-
-        /* raw button byte, as 8 bits, for debugging the decode */
-        {
-            int i;
-            for (i = 0; i < 8; i++)
-                box(620 + i * 40, 560, 32, 32, (b & (1 << (7 - i))) ? ON : OFF);
+        /* remaining buttons, one labeled-by-position row:
+           L1 R1 L2 R2 | Share Options | L3 R3 | PS TP  (btn[4..13]) */
+        for (i = 4; i < NBTN; i++) {
+            int x = 660 + (i - 4) * 36;
+            /* small gaps between groups */
+            x += (i >= 8) * 12 + (i >= 10) * 12 + (i >= 12) * 12;
+            outline(x - 2, 556, 32 + 4, 32 + 4, 2, BOX);
+            box(x, 558, 32, 32, btn[i] ? ON : OFF);
         }
 
         SDL_Flip(scr);
